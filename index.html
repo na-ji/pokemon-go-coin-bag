@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11131a">
+  <meta name="description" content="Emulates a Nintendo Switch over Web Bluetooth to pair with the Pokémon GO app and receive postcards, without needing a real Switch.">
+  <title>Pokémon Go Coin Bag</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <button id="thing" type="button" data-state="ready">
+      <span id="thing-state">Connect</span>
+      <small id="thing-detail"></small>
+    </button>
+
+    <section class="instructions">
+      <div class="step">
+        <h2>Step 1 · Pair Switch</h2>
+        <p>In Pokémon GO: Poké Ball menu → Settings → Connected devices and Services → Nintendo Switch → Connect to Nintendo Switch → pick your game.</p>
+        <p>Then press the button above.</p>
+      </div>
+      <div class="step">
+        <h2>Step 2 · Send postcard</h2>
+        <p>In Pokémon GO: Items → Postcard Book → pick a postcard → SEND TO NINTENDO SWITCH.</p>
+        <p>Then press the button above to receive it.</p>
+      </div>
+      <p class="note">Requires a browser with Web Bluetooth support (e.g. Chrome or Edge on desktop or Android).</p>
+    </section>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
