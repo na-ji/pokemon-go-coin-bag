@@ -16,8 +16,11 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +52,7 @@ private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID =
 private const val SCAN_TIMEOUT_MS = 30_000L
 private const val INDICATION_TIMEOUT_MS = 15_000L
 private const val SETTLE_MS = 75L
+private const val GATT_OP_TIMEOUT_MS = 10_000L
 
 @SuppressLint("MissingPermission") // caller (MainActivity) verifies runtime permissions before calling run()
 class BleClient(private val context: Context) {
@@ -59,6 +63,7 @@ class BleClient(private val context: Context) {
     private var gatt: BluetoothGatt? = null
     private var connectionResult: CompletableDeferred<Unit>? = null
     private var servicesResult: CompletableDeferred<Unit>? = null
+    private var mtuResult: CompletableDeferred<Int>? = null
     private var readResult: CompletableDeferred<ByteArray>? = null
     private var writeResult: CompletableDeferred<Unit>? = null
     private var descriptorResult: CompletableDeferred<Unit>? = null
@@ -69,7 +74,15 @@ class BleClient(private val context: Context) {
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 connectionResult?.complete(Unit)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                connectionResult?.completeExceptionally(GattError("Disconnected (status $status)"))
+                failAllPending("Disconnected (status $status)")
+            }
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                mtuResult?.complete(mtu)
+            } else {
+                mtuResult?.completeExceptionally(GattError("MTU negotiation failed (status $status)"))
             }
         }
 
@@ -135,6 +148,20 @@ class BleClient(private val context: Context) {
         }
     }
 
+    private fun failAllPending(reason: String) {
+        val error = GattError(reason)
+        listOf<CompletableDeferred<*>?>(
+            connectionResult,
+            servicesResult,
+            mtuResult,
+            readResult,
+            writeResult,
+            descriptorResult,
+        ).forEach { deferred ->
+            if (deferred?.isCompleted == false) deferred.completeExceptionally(error)
+        }
+    }
+
     suspend fun run() {
         try {
             _state.value = AppState.Scanning
@@ -175,6 +202,8 @@ class BleClient(private val context: Context) {
                 }
                 else -> throw GattError("Unsupported mobile app mode 0x${"%02x".format(modeValue[0])}")
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (error: Exception) {
             _state.value = AppState.Failure(error.message ?: error.toString())
         } finally {
@@ -218,15 +247,30 @@ class BleClient(private val context: Context) {
         }
     }
 
+    private suspend fun <T> awaitGattOp(operation: String, block: suspend () -> T): T =
+        try {
+            withTimeout(GATT_OP_TIMEOUT_MS) { block() }
+        } catch (timeout: TimeoutCancellationException) {
+            throw GattError("Timed out waiting for $operation after ${GATT_OP_TIMEOUT_MS / 1000}s")
+        }
+
     private suspend fun connectAndDiscover(device: BluetoothDevice): BluetoothGatt {
         connectionResult = CompletableDeferred()
         val connectedGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        connectionResult!!.await()
+        gatt = connectedGatt
+        awaitGattOp("GATT connection") { connectionResult!!.await() }
+        delay(SETTLE_MS)
+
+        // Default ATT MTU is 23 bytes; the ~295-byte exchange payload needs a larger one and only
+        // the central can negotiate it.
+        mtuResult = CompletableDeferred()
+        if (!connectedGatt.requestMtu(517)) throw GattError("Failed to start MTU negotiation")
+        awaitGattOp("MTU negotiation") { mtuResult!!.await() }
         delay(SETTLE_MS)
 
         servicesResult = CompletableDeferred()
         if (!connectedGatt.discoverServices()) throw GattError("Failed to start service discovery")
-        servicesResult!!.await()
+        awaitGattOp("service discovery") { servicesResult!!.await() }
         delay(SETTLE_MS)
         return connectedGatt
     }
@@ -250,7 +294,7 @@ class BleClient(private val context: Context) {
     ): ByteArray {
         readResult = CompletableDeferred()
         if (!connectedGatt.readCharacteristic(characteristic)) throw GattError("Failed to start characteristic read")
-        val value = readResult!!.await()
+        val value = awaitGattOp("read of ${characteristic.uuid}") { readResult!!.await() }
         delay(SETTLE_MS)
         return value
     }
@@ -271,7 +315,7 @@ class BleClient(private val context: Context) {
             connectedGatt.writeCharacteristic(characteristic)
         }
         if (!started) throw GattError("Failed to start characteristic write")
-        writeResult!!.await()
+        awaitGattOp("write of ${characteristic.uuid}") { writeResult!!.await() }
         delay(SETTLE_MS)
     }
 
@@ -290,7 +334,7 @@ class BleClient(private val context: Context) {
             connectedGatt.writeDescriptor(cccd)
         }
         if (!started) throw GattError("Failed to start CCCD write for ${characteristic.uuid}")
-        descriptorResult!!.await()
+        awaitGattOp("CCCD write of ${characteristic.uuid}") { descriptorResult!!.await() }
         delay(SETTLE_MS)
     }
 
@@ -321,8 +365,11 @@ class BleClient(private val context: Context) {
         )
 
         val dataChar = chars.getValue(ServiceUuids.indicateData)
-        enableIndications(connectedGatt, dataChar)
-        val firstRaw = awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS)
+        val firstRaw = coroutineScope {
+            val waiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
+            enableIndications(connectedGatt, dataChar)
+            waiter.await()
+        }
         require(firstRaw.size >= 303) {
             "First indication is only ${firstRaw.size} bytes; the negotiated ATT MTU may be insufficient"
         }
@@ -339,8 +386,11 @@ class BleClient(private val context: Context) {
 
         // Notifications are enabled on the STAGE characteristic, but — matching docs/app.js exactly —
         // the final payload is delivered as a second indication on the DATA characteristic, not STAGE.
-        enableIndications(connectedGatt, chars.getValue(ServiceUuids.indicateStage))
-        val finalRaw = awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS)
+        val finalRaw = coroutineScope {
+            val waiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
+            enableIndications(connectedGatt, chars.getValue(ServiceUuids.indicateStage))
+            waiter.await()
+        }
         val finalize = decodeProtocolBleFinalize(finalRaw)
         validateFinalize(finalize, applicationId, nonce)
 
