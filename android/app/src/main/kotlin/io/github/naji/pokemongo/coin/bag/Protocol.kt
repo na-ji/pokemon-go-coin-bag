@@ -3,6 +3,7 @@ package io.github.naji.pokemongo.coin.bag
 import java.math.BigInteger
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Base64
 
 fun concatBytes(vararg parts: ByteArray): ByteArray {
@@ -265,4 +266,77 @@ fun encodeProtocolComplete(transactionId: Long, nonce: String): ByteArray {
         bytesField(2, applicationSignature),
         bytesField(3, firmwareSignature),
     )
+}
+
+private val UUID_V4_REGEX =
+    Regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+fun normalizeUuid4(value: String): String {
+    val uuid = value.trim().lowercase()
+    require(UUID_V4_REGEX.matches(uuid)) { "Identity must be a canonical UUIDv4" }
+    return uuid
+}
+
+fun applicationIdFromUuid(uuid: String): String =
+    "${normalizeUuid4(uuid)}${Constants.applicationIdSuffix}"
+
+fun applicationIdGattValue(applicationId: String): ByteArray {
+    require(applicationId.endsWith(Constants.applicationIdSuffix)) {
+        "Application ID must end with ${Constants.applicationIdSuffix}"
+    }
+    val uuid = applicationId.removeSuffix(Constants.applicationIdSuffix)
+    require(applicationIdFromUuid(uuid) == applicationId) {
+        "Application ID UUID is not canonical UUIDv4 form"
+    }
+    val encoded = applicationId.toByteArray(Charsets.UTF_8)
+    require(encoded.size <= Constants.applicationIdGattWidth) {
+        "Application ID exceeds the ${Constants.applicationIdGattWidth}-byte GATT field"
+    }
+    val result = ByteArray(Constants.applicationIdGattWidth)
+    System.arraycopy(encoded, 0, result, 0, encoded.size)
+    return result
+}
+
+fun decodePlayerName(value: ByteArray): String {
+    require(value.size in 4..15) { "Player name must be 4..15 UTF-8 bytes" }
+    return String(value, Charsets.UTF_8)
+}
+
+fun initialNonceGattValue(nonce: String): ByteArray {
+    val encoded = nonce.toByteArray(Charsets.UTF_8)
+    require(!encoded.contains(0)) { "Nonce contains NUL" }
+    return concatBytes(encoded, byteArrayOf(0))
+}
+
+fun finalNonceGattValue(nonce: String): ByteArray {
+    val encoded = nonce.toByteArray(Charsets.UTF_8)
+    require(!encoded.contains(0)) { "Nonce contains NUL" }
+    return encoded
+}
+
+fun peripheralNonceFromTick(inputTick: Long): String {
+    val tick = inputTick.toULong()
+    var value = 0xcbf29ce484222645UL
+    for (index in 0 until 8) {
+        val octet = (tick shr (8 * index)) and 0xffUL
+        value = value xor octet
+        value *= 0x100000001b3UL
+    }
+    return value.toString(16)
+}
+
+fun randomPeripheralNonce(): String = peripheralNonceFromTick(SecureRandom().nextLong())
+
+fun validateSend(message: ProtocolBleSend, expectedApplicationId: String, expectedNonce: String) {
+    require(message.serverResponse.applicationId == expectedApplicationId) {
+        "Server response application ID mismatch"
+    }
+    require(message.serverResponse.nonce == expectedNonce) {
+        "Server response nonce mismatch"
+    }
+}
+
+fun validateFinalize(message: ProtocolBleFinalize, expectedApplicationId: String, expectedNonce: String) {
+    require(message.applicationId == expectedApplicationId) { "Finalize application ID mismatch" }
+    require(message.nonce == expectedNonce) { "Finalize nonce mismatch" }
 }
