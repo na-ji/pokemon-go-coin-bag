@@ -377,17 +377,19 @@ class BleClient(private val context: Context) {
         validateSend(send, applicationId, nonce)
 
         val complete = encodeProtocolComplete(send.serverResponse.transactionId, send.serverResponse.nonce)
-        writeCharacteristic(
-            connectedGatt,
-            chars.getValue(ServiceUuids.writeComplete),
-            complete,
-            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
-        )
 
         // Notifications are enabled on the STAGE characteristic, but — matching docs/app.js exactly —
         // the final payload is delivered as a second indication on the DATA characteristic, not STAGE.
+        // Both writes live inside the scope so the waiter is subscribed before the COMPLETE write,
+        // which is what actually triggers the phone's response.
         val finalRaw = coroutineScope {
             val waiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
+            writeCharacteristic(
+                connectedGatt,
+                chars.getValue(ServiceUuids.writeComplete),
+                complete,
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+            )
             enableIndications(connectedGatt, chars.getValue(ServiceUuids.indicateStage))
             waiter.await()
         }
