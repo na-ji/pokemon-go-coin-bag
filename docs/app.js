@@ -360,7 +360,7 @@ async function doTheThing() {
         applicationIdGattValue(applicationId)
       );
       localStorage.setItem(storageKey, applicationId);
-      setState("success-pair", "Now in GO: Items → Postcard Book → SEND TO NINTENDO SWITCH, then click Connect again");
+      setState("success-pair", `Paired with ${playerName}. Now in GO: Items → Postcard Book → SEND TO NINTENDO SWITCH, then click Connect again`);
     } else if (mode[0] === 0x01) {
       setState("exchanging");
       await performExchange(chars, applicationId, nonce, 15_000);
