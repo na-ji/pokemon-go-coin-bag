@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
+import java.time.Instant
 import java.util.UUID
 
 class GattError(message: String) : Exception(message)
@@ -64,6 +65,13 @@ class BleClient(private val context: Context) {
 
     private val _state = MutableStateFlow<AppState>(AppState.Idle)
     val state: StateFlow<AppState> = _state.asStateFlow()
+
+    private val _log = MutableStateFlow<List<LogEntry>>(emptyList())
+    val log: StateFlow<List<LogEntry>> = _log.asStateFlow()
+
+    private fun addLogEntry(entry: LogEntry) {
+        _log.value = _log.value + entry
+    }
 
     private var gatt: BluetoothGatt? = null
     private var connectionResult: CompletableDeferred<Unit>? = null
@@ -206,11 +214,13 @@ class BleClient(private val context: Context) {
                         )
                         prefs.edit().putString("pairedApplicationId:$playerName", applicationId).apply()
                         _state.value = AppState.SuccessPair(playerName)
+                        addLogEntry(LogEntry(Instant.now(), LogEventType.PAIRED, playerName = playerName))
                     }
                     0x01.toByte() -> {
                         _state.value = AppState.Exchanging
                         performExchange(connectedGatt, chars, applicationId, nonce)
                         _state.value = AppState.SuccessExchange(playerName)
+                        addLogEntry(LogEntry(Instant.now(), LogEventType.EXCHANGED, playerName = playerName))
                     }
                     else -> throw GattError("Unsupported mobile app mode 0x${"%02x".format(modeValue[0])}")
                 }
@@ -218,7 +228,9 @@ class BleClient(private val context: Context) {
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {
-                _state.value = AppState.Failure(error.message ?: error.toString())
+                val message = error.message ?: error.toString()
+                _state.value = AppState.Failure(message)
+                addLogEntry(LogEntry(Instant.now(), LogEventType.FAILED, message = message))
                 delay(POST_FAILURE_DELAY_MS)
             } finally {
                 gatt?.disconnect()

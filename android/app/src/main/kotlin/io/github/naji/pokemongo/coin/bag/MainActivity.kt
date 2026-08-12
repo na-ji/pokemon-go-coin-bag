@@ -45,7 +45,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val state by bleClient.state.collectAsState()
-            StatusScreen(state = state, permissionDenied = permissionDenied)
+            val log by bleClient.log.collectAsState()
+            StatusScreen(state = state, permissionDenied = permissionDenied, log = log)
         }
     }
 

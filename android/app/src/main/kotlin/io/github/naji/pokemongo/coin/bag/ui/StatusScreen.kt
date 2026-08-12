@@ -3,11 +3,14 @@ package io.github.naji.pokemongo.coin.bag.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -21,6 +24,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.naji.pokemongo.coin.bag.AppState
+import io.github.naji.pokemongo.coin.bag.LogEntry
+import io.github.naji.pokemongo.coin.bag.LogEventType
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 private fun stateLabel(state: AppState): String = when (state) {
     AppState.Idle -> "waiting…"
@@ -42,7 +50,7 @@ private fun stateColor(state: AppState): Color = when (state) {
 }
 
 @Composable
-fun StatusScreen(state: AppState, permissionDenied: Boolean) {
+fun StatusScreen(state: AppState, permissionDenied: Boolean, log: List<LogEntry> = emptyList()) {
     Surface(color = Color(0xFF11131A)) {
         Column(
             modifier = Modifier
@@ -72,7 +80,72 @@ fun StatusScreen(state: AppState, permissionDenied: Boolean) {
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+            HistoryCard(log)
+
+            Spacer(modifier = Modifier.height(24.dp))
             InstructionsCard()
+        }
+    }
+}
+
+private val timeFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+
+private fun logIcon(type: LogEventType): String = when (type) {
+    LogEventType.PAIRED -> "🔗"
+    LogEventType.EXCHANGED -> "📮"
+    LogEventType.FAILED -> "⚠️"
+}
+
+private fun logSummary(entry: LogEntry): String = when (entry.type) {
+    LogEventType.PAIRED -> "Paired with ${entry.playerName}"
+    LogEventType.EXCHANGED -> "Postcard received from ${entry.playerName}"
+    LogEventType.FAILED -> entry.message ?: "Failed"
+}
+
+@Composable
+private fun HistoryCard(log: List<LogEntry>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0x0AFFFFFF), RoundedCornerShape(24.dp))
+            .padding(20.dp),
+    ) {
+        Text("History", color = Color.White, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(12.dp))
+        if (log.isEmpty()) {
+            Text("No activity yet.", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                val entries = log.asReversed()
+                entries.forEachIndexed { index, entry ->
+                    LogEntryRow(entry)
+                    if (index != entries.lastIndex) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogEntryRow(entry: LogEntry) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(text = logIcon(entry.type), fontSize = 18.sp)
+        Spacer(modifier = Modifier.width(10.dp))
+        Column {
+            Text(text = logSummary(entry), color = Color.White, fontSize = 14.sp)
+            Text(
+                text = timeFormatter.format(entry.timestamp),
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 11.sp,
+            )
         }
     }
 }
