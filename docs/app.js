@@ -249,7 +249,7 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
   );
   await writeWithoutResponse(chars.complete, complete, "Write RSA completion");
 
-  const finalWaiter = characteristicValueWaiter(chars.data, timeoutMs, "final DATA indication");
+  const finalWaiter = characteristicValueWaiter(chars.stage, timeoutMs, "STAGE indication");
   try {
     await gattOperation(
       "Enable STAGE indications",
@@ -261,9 +261,9 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
     throw error;
   }
 
-  console.log("→ Wait for final DATA indication");
+  console.log("→ Wait for STAGE indication");
   const finalRaw = await finalWaiter.promise;
-  console.log(`✓ Received final DATA indication (${finalRaw.length} bytes)`);
+  console.log(`✓ Received STAGE indication (${finalRaw.length} bytes)`);
 
   const finalize = decodeProtocolBleFinalize(finalRaw);
   validateFinalize(finalize, applicationId, nonce);
@@ -288,9 +288,7 @@ async function doTheThing() {
     console.group(`do the thing — ${CLIENT_VERSION}`);
     console.log("Browser:", navigator.userAgent);
 
-    const applicationId = applicationIdFromUuid(crypto.randomUUID());
     const nonce = randomPeripheralNonce();
-    console.log("Random application ID:", applicationId);
     console.log("Nonce:", nonce);
 
     setState("requesting-device");
@@ -298,13 +296,7 @@ async function doTheThing() {
       filters: [{ services: [UUIDS.advertisementService] }],
       optionalServices: [UUIDS.gattService],
     });
-    console.log("Selected device:", activeDevice.name || "unnamed device");
-
-    activeDevice.addEventListener(
-      "gattserverdisconnected",
-      () => console.log("Bluetooth device disconnected."),
-      { once: true }
-    );
+    console.log("Selected device:", activeDevice.name || "unnamed device", "id:", activeDevice.id);
 
     setState("connecting");
     const server = await gattOperation(
@@ -345,6 +337,21 @@ async function doTheThing() {
     console.log("Player:", playerName);
     console.log(`Mode: 0x${mode[0].toString(16).padStart(2, "0")}`);
 
+    const storageKey = `pairedApplicationId:${playerName}`;
+    let applicationId;
+    if (mode[0] === 0x01) {
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
+        applicationId = stored;
+        console.log("Reusing stored applicationId for", playerName);
+      } else {
+        applicationId = applicationIdFromUuid(crypto.randomUUID());
+        console.log("No stored applicationId for", playerName, "— generating new");
+      }
+    } else {
+      applicationId = applicationIdFromUuid(crypto.randomUUID());
+    }
+
     if (mode[0] === 0x00) {
       setState("pairing");
       await sleep(250);
@@ -352,7 +359,8 @@ async function doTheThing() {
         chars.applicationId,
         applicationIdGattValue(applicationId)
       );
-      setState("success-pair");
+      localStorage.setItem(storageKey, applicationId);
+      setState("success-pair", "Now in GO: Items → Postcard Book → SEND TO NINTENDO SWITCH, then click Connect again");
     } else if (mode[0] === 0x01) {
       setState("exchanging");
       await performExchange(chars, applicationId, nonce, 15_000);
