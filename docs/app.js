@@ -364,7 +364,7 @@ async function doTheThing() {
     } else if (mode[0] === 0x01) {
       setState("exchanging");
       await performExchange(chars, applicationId, nonce, 15_000);
-      setState("success-exchange");
+      setState("success-exchange", `Postcard received from ${playerName}`);
     } else {
       throw new Error(`Unsupported mobile app mode 0x${mode[0].toString(16).padStart(2, "0")}`);
     }

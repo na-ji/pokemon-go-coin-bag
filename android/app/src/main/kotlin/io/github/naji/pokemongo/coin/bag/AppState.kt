@@ -7,7 +7,7 @@ sealed interface AppState {
     data object ReadingDevice : AppState
     data object Pairing : AppState
     data object Exchanging : AppState
-    data object SuccessPair : AppState
-    data object SuccessExchange : AppState
+    data class SuccessPair(val playerName: String) : AppState
+    data class SuccessExchange(val playerName: String) : AppState
     data class Failure(val message: String) : AppState
 }

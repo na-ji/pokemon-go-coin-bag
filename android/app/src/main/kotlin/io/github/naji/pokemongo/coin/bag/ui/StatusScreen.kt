@@ -29,13 +29,13 @@ private fun stateLabel(state: AppState): String = when (state) {
     AppState.ReadingDevice -> "checking device…"
     AppState.Pairing -> "pairing Switch…"
     AppState.Exchanging -> "receiving postcard…"
-    AppState.SuccessPair -> "Switch paired!"
-    AppState.SuccessExchange -> "postcard received!"
+    is AppState.SuccessPair -> "Switch paired!"
+    is AppState.SuccessExchange -> "postcard received!"
     is AppState.Failure -> "failed"
 }
 
 private fun stateColor(state: AppState): Color = when (state) {
-    AppState.SuccessPair, AppState.SuccessExchange -> Color(0xFF69D391)
+    is AppState.SuccessPair, is AppState.SuccessExchange -> Color(0xFF69D391)
     is AppState.Failure -> Color(0xFFFF7C8C)
     AppState.Idle -> Color(0xFF8B79FF)
     else -> Color(0xFFD2A63D)
@@ -58,9 +58,15 @@ fun StatusScreen(state: AppState, permissionDenied: Boolean) {
                     color = Color(0xFF4A4D5C),
                 )
             } else {
+                val detail = when (state) {
+                    is AppState.Failure -> state.message
+                    is AppState.SuccessPair -> "Paired with ${state.playerName}"
+                    is AppState.SuccessExchange -> "Postcard received from ${state.playerName}"
+                    else -> null
+                }
                 StatusCard(
                     label = stateLabel(state),
-                    detail = (state as? AppState.Failure)?.message,
+                    detail = detail,
                     color = stateColor(state),
                 )
             }

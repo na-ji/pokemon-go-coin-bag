@@ -205,12 +205,12 @@ class BleClient(private val context: Context) {
                             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
                         )
                         prefs.edit().putString("pairedApplicationId:$playerName", applicationId).apply()
-                        _state.value = AppState.SuccessPair
+                        _state.value = AppState.SuccessPair(playerName)
                     }
                     0x01.toByte() -> {
                         _state.value = AppState.Exchanging
                         performExchange(connectedGatt, chars, applicationId, nonce)
-                        _state.value = AppState.SuccessExchange
+                        _state.value = AppState.SuccessExchange(playerName)
                     }
                     else -> throw GattError("Unsupported mobile app mode 0x${"%02x".format(modeValue[0])}")
                 }

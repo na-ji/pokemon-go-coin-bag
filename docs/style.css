@@ -18,7 +18,7 @@ body {
 }
 
 .wrap {
-  width: min(44rem, 92vw);
+  width: min(44rem, 100%);
   display: flex;
   flex-direction: column;
   align-items: stretch;
