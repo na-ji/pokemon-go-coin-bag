@@ -50,8 +50,9 @@ private object ServiceUuids {
 private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID =
     UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-private const val SCAN_TIMEOUT_MS = 30_000L
 private const val INDICATION_TIMEOUT_MS = 15_000L
+private const val POST_SUCCESS_DELAY_MS = 5_000L
+private const val POST_FAILURE_DELAY_MS = 3_000L
 private const val SETTLE_MS = 75L
 private const val GATT_OP_TIMEOUT_MS = 10_000L
 
@@ -167,59 +168,63 @@ class BleClient(private val context: Context) {
     }
 
     suspend fun run() {
-        try {
-            _state.value = AppState.Scanning
-            val device = scanForDevice()
+        while (true) {
+            try {
+                _state.value = AppState.Scanning
+                val device = scanForDevice()
 
-            _state.value = AppState.Connecting
-            val connectedGatt = connectAndDiscover(device)
-            gatt = connectedGatt
+                _state.value = AppState.Connecting
+                val connectedGatt = connectAndDiscover(device)
+                gatt = connectedGatt
 
-            _state.value = AppState.ReadingDevice
-            val chars = requireCharacteristics(connectedGatt)
-            val protocolValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readProtocol))
-            require(protocolValue.size == 1 && protocolValue[0] == 0x01.toByte()) { "Unsupported protocol value" }
-            val nameValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readName))
-            val playerName = decodePlayerName(nameValue)
-            val modeValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readMode))
-            require(modeValue.size == 1) { "Invalid mobile app mode characteristic" }
+                _state.value = AppState.ReadingDevice
+                val chars = requireCharacteristics(connectedGatt)
+                val protocolValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readProtocol))
+                require(protocolValue.size == 1 && protocolValue[0] == 0x01.toByte()) { "Unsupported protocol value" }
+                val nameValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readName))
+                val playerName = decodePlayerName(nameValue)
+                val modeValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readMode))
+                require(modeValue.size == 1) { "Invalid mobile app mode characteristic" }
 
-            val nonce = randomPeripheralNonce()
-            val applicationId = if (modeValue[0] == 0x01.toByte()) {
-                prefs.getString("pairedApplicationId:$playerName", null)
-                    ?: applicationIdFromUuid(UUID.randomUUID().toString())
-            } else {
-                applicationIdFromUuid(UUID.randomUUID().toString())
-            }
-
-            when (modeValue[0]) {
-                0x00.toByte() -> {
-                    _state.value = AppState.Pairing
-                    delay(250)
-                    writeCharacteristic(
-                        connectedGatt,
-                        chars.getValue(ServiceUuids.writeApplicationId),
-                        applicationIdGattValue(applicationId),
-                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-                    )
-                    prefs.edit().putString("pairedApplicationId:$playerName", applicationId).apply()
-                    _state.value = AppState.SuccessPair
+                val nonce = randomPeripheralNonce()
+                val applicationId = if (modeValue[0] == 0x01.toByte()) {
+                    prefs.getString("pairedApplicationId:$playerName", null)
+                        ?: applicationIdFromUuid(UUID.randomUUID().toString())
+                } else {
+                    applicationIdFromUuid(UUID.randomUUID().toString())
                 }
-                0x01.toByte() -> {
-                    _state.value = AppState.Exchanging
-                    performExchange(connectedGatt, chars, applicationId, nonce)
-                    _state.value = AppState.SuccessExchange
+
+                when (modeValue[0]) {
+                    0x00.toByte() -> {
+                        _state.value = AppState.Pairing
+                        delay(250)
+                        writeCharacteristic(
+                            connectedGatt,
+                            chars.getValue(ServiceUuids.writeApplicationId),
+                            applicationIdGattValue(applicationId),
+                            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+                        )
+                        prefs.edit().putString("pairedApplicationId:$playerName", applicationId).apply()
+                        _state.value = AppState.SuccessPair
+                    }
+                    0x01.toByte() -> {
+                        _state.value = AppState.Exchanging
+                        performExchange(connectedGatt, chars, applicationId, nonce)
+                        _state.value = AppState.SuccessExchange
+                    }
+                    else -> throw GattError("Unsupported mobile app mode 0x${"%02x".format(modeValue[0])}")
                 }
-                else -> throw GattError("Unsupported mobile app mode 0x${"%02x".format(modeValue[0])}")
+                delay(POST_SUCCESS_DELAY_MS)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                _state.value = AppState.Failure(error.message ?: error.toString())
+                delay(POST_FAILURE_DELAY_MS)
+            } finally {
+                gatt?.disconnect()
+                gatt?.close()
+                gatt = null
             }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (error: Exception) {
-            _state.value = AppState.Failure(error.message ?: error.toString())
-        } finally {
-            gatt?.disconnect()
-            gatt?.close()
-            gatt = null
         }
     }
 
@@ -249,9 +254,7 @@ class BleClient(private val context: Context) {
 
         scanner.startScan(filters, settings, callback)
         return try {
-            withTimeout(SCAN_TIMEOUT_MS) { result.await() }
-        } catch (timeout: TimeoutCancellationException) {
-            throw GattError("No matching device found within ${SCAN_TIMEOUT_MS / 1000}s")
+            result.await()
         } finally {
             scanner.stopScan(callback)
         }
