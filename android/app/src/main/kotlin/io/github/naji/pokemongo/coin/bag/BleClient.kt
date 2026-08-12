@@ -14,6 +14,7 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.CancellationException
@@ -56,6 +57,9 @@ private const val GATT_OP_TIMEOUT_MS = 10_000L
 
 @SuppressLint("MissingPermission") // caller (MainActivity) verifies runtime permissions before calling run()
 class BleClient(private val context: Context) {
+
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences("paired_app_ids", Context.MODE_PRIVATE)
 
     private val _state = MutableStateFlow<AppState>(AppState.Idle)
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -176,12 +180,17 @@ class BleClient(private val context: Context) {
             val protocolValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readProtocol))
             require(protocolValue.size == 1 && protocolValue[0] == 0x01.toByte()) { "Unsupported protocol value" }
             val nameValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readName))
-            decodePlayerName(nameValue)
+            val playerName = decodePlayerName(nameValue)
             val modeValue = readCharacteristic(connectedGatt, chars.getValue(ServiceUuids.readMode))
             require(modeValue.size == 1) { "Invalid mobile app mode characteristic" }
 
-            val applicationId = applicationIdFromUuid(UUID.randomUUID().toString())
             val nonce = randomPeripheralNonce()
+            val applicationId = if (modeValue[0] == 0x01.toByte()) {
+                prefs.getString("pairedApplicationId:$playerName", null)
+                    ?: applicationIdFromUuid(UUID.randomUUID().toString())
+            } else {
+                applicationIdFromUuid(UUID.randomUUID().toString())
+            }
 
             when (modeValue[0]) {
                 0x00.toByte() -> {
@@ -193,6 +202,7 @@ class BleClient(private val context: Context) {
                         applicationIdGattValue(applicationId),
                         BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
                     )
+                    prefs.edit().putString("pairedApplicationId:$playerName", applicationId).apply()
                     _state.value = AppState.SuccessPair
                 }
                 0x01.toByte() -> {
@@ -378,19 +388,16 @@ class BleClient(private val context: Context) {
 
         val complete = encodeProtocolComplete(send.serverResponse.transactionId, send.serverResponse.nonce)
 
-        // Notifications are enabled on the STAGE characteristic, but — matching docs/app.js exactly —
-        // the final payload is delivered as a second indication on the DATA characteristic, not STAGE.
-        // Both writes live inside the scope so the waiter is subscribed before the COMPLETE write,
-        // which is what actually triggers the phone's response.
+        val stageChar = chars.getValue(ServiceUuids.indicateStage)
         val finalRaw = coroutineScope {
-            val waiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
+            val waiter = async { awaitIndication(stageChar.uuid, INDICATION_TIMEOUT_MS) }
             writeCharacteristic(
                 connectedGatt,
                 chars.getValue(ServiceUuids.writeComplete),
                 complete,
                 BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
             )
-            enableIndications(connectedGatt, chars.getValue(ServiceUuids.indicateStage))
+            enableIndications(connectedGatt, stageChar)
             waiter.await()
         }
         val finalize = decodeProtocolBleFinalize(finalRaw)
