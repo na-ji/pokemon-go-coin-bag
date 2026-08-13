@@ -268,25 +268,28 @@ fun encodeProtocolComplete(transactionId: Long, nonce: String): ByteArray {
     )
 }
 
-private val UUID_V4_REGEX =
-    Regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+private val UUID_V5_NAMESPACE = hexToBytes("6ba7b8109dad11d180b400c04fd430c8")
 
-fun normalizeUuid4(value: String): String {
-    val uuid = value.trim().lowercase()
-    require(UUID_V4_REGEX.matches(uuid)) { "Identity must be a canonical UUIDv4" }
-    return uuid
+private fun formatUuid(bytes: ByteArray): String {
+    val hex = bytesToHex(bytes.copyOf(16))
+    return "${hex.substring(0,8)}-${hex.substring(8,12)}-${hex.substring(12,16)}-${hex.substring(16,20)}-${hex.substring(20,32)}"
 }
 
-fun applicationIdFromUuid(uuid: String): String =
-    "${normalizeUuid4(uuid)}${Constants.applicationIdSuffix}"
+fun generateApplicationId(): String {
+    val name = ByteArray(16)
+    SecureRandom().nextBytes(name)
+    val sha1 = MessageDigest.getInstance("SHA-1")
+    sha1.update(UUID_V5_NAMESPACE)
+    sha1.update(name)
+    val hash = sha1.digest()
+    hash[6] = ((hash[6].toInt() and 0x0f) or 0x50).toByte()
+    hash[8] = ((hash[8].toInt() and 0x3f) or 0x80).toByte()
+    return "${formatUuid(hash)}${Constants.applicationIdSuffix}"
+}
 
 fun applicationIdGattValue(applicationId: String): ByteArray {
     require(applicationId.endsWith(Constants.applicationIdSuffix)) {
         "Application ID must end with ${Constants.applicationIdSuffix}"
-    }
-    val uuid = applicationId.removeSuffix(Constants.applicationIdSuffix)
-    require(applicationIdFromUuid(uuid) == applicationId) {
-        "Application ID UUID is not canonical UUIDv4 form"
     }
     val encoded = applicationId.toByteArray(Charsets.UTF_8)
     require(encoded.size <= Constants.applicationIdGattWidth) {

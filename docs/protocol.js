@@ -254,25 +254,26 @@ export async function encodeProtocolComplete(transactionId, nonce) {
   );
 }
 
-export function normalizeUuid4(value) {
-  const uuid = value.trim().toLowerCase();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)) {
-    throw new Error("Identity must be a canonical UUIDv4");
-  }
-  return uuid;
+function formatUuid(bytes) {
+  const hex = bytesToHex(bytes.slice(0, 16));
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
 }
 
-export function applicationIdFromUuid(uuid) {
-  return `${normalizeUuid4(uuid)}${APPLICATION_ID_SUFFIX}`;
+const UUID_V5_NAMESPACE = hexToBytes("6ba7b8109dad11d180b400c04fd430c8");
+
+export async function generateApplicationId() {
+  const name = new Uint8Array(16);
+  crypto.getRandomValues(name);
+  const data = concatBytes(UUID_V5_NAMESPACE, name);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-1", data));
+  hash[6] = (hash[6] & 0x0f) | 0x50;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  return `${formatUuid(hash)}${APPLICATION_ID_SUFFIX}`;
 }
 
 export function applicationIdGattValue(applicationId) {
   if (!applicationId.endsWith(APPLICATION_ID_SUFFIX)) {
     throw new Error(`Application ID must end with ${APPLICATION_ID_SUFFIX}`);
-  }
-  const uuid = applicationId.slice(0, -APPLICATION_ID_SUFFIX.length);
-  if (applicationIdFromUuid(uuid) !== applicationId) {
-    throw new Error("Application ID UUID is not canonical UUIDv4 form");
   }
   const encoded = textEncoder.encode(applicationId);
   if (encoded.length > APPLICATION_ID_GATT_WIDTH) {

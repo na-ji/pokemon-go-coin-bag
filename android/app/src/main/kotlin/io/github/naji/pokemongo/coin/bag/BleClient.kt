@@ -197,9 +197,9 @@ class BleClient(private val context: Context) {
                 val nonce = randomPeripheralNonce()
                 val applicationId = if (modeValue[0] == 0x01.toByte()) {
                     prefs.getString("pairedApplicationId:$playerName", null)
-                        ?: applicationIdFromUuid(UUID.randomUUID().toString())
+                        ?: generateApplicationId()
                 } else {
-                    applicationIdFromUuid(UUID.randomUUID().toString())
+                    generateApplicationId()
                 }
 
                 when (modeValue[0]) {

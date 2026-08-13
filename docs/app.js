@@ -1,7 +1,7 @@
 import {
   UUIDS,
-  applicationIdFromUuid,
   applicationIdGattValue,
+  generateApplicationId,
   decodeProtocolBleFinalize,
   decodeProtocolBleSend,
   decodePlayerName,
@@ -345,11 +345,11 @@ async function doTheThing() {
         applicationId = stored;
         console.log("Reusing stored applicationId for", playerName);
       } else {
-        applicationId = applicationIdFromUuid(crypto.randomUUID());
+        applicationId = await generateApplicationId();
         console.log("No stored applicationId for", playerName, "— generating new");
       }
     } else {
-      applicationId = applicationIdFromUuid(crypto.randomUUID());
+      applicationId = await generateApplicationId();
     }
 
     if (mode[0] === 0x00) {
