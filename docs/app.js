@@ -206,25 +206,23 @@ async function getCharacteristics(service) {
 }
 
 async function performExchange(chars, applicationId, nonce, timeoutMs) {
-  await writeWithResponse(
-    chars.applicationId,
-    applicationIdGattValue(applicationId),
-    "Write application ID"
-  );
+  const noSettle = { settleMs: 0 };
 
-  await writeWithoutResponse(
-    chars.initialNonce,
-    initialNonceGattValue(nonce),
-    "Write initial nonce"
-  );
+  await gattOperation("Write application ID", async () => {
+    if (typeof chars.applicationId.writeValueWithResponse === "function") {
+      await chars.applicationId.writeValueWithResponse(applicationIdGattValue(applicationId));
+    } else {
+      await chars.applicationId.writeValue(applicationIdGattValue(applicationId));
+    }
+  }, noSettle);
+
+  await gattOperation("Write initial nonce", async () => {
+    await chars.initialNonce.writeValueWithoutResponse(initialNonceGattValue(nonce));
+  }, noSettle);
 
   const firstWaiter = characteristicValueWaiter(chars.data, timeoutMs, "first DATA indication");
   try {
-    await gattOperation(
-      "Enable DATA indications",
-      () => chars.data.startNotifications(),
-      { settleMs: 0 }
-    );
+    await gattOperation("Enable DATA indications", () => chars.data.startNotifications(), noSettle);
   } catch (error) {
     firstWaiter.cancel("DATA subscription failed");
     throw error;
@@ -247,15 +245,13 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
     send.serverResponse.transactionId,
     send.serverResponse.nonce
   );
-  await writeWithoutResponse(chars.complete, complete, "Write RSA completion");
+  await gattOperation("Write RSA completion", async () => {
+    await chars.complete.writeValueWithoutResponse(complete);
+  }, noSettle);
 
   const finalWaiter = characteristicValueWaiter(chars.stage, timeoutMs, "STAGE indication");
   try {
-    await gattOperation(
-      "Enable STAGE indications",
-      () => chars.stage.startNotifications(),
-      { settleMs: 0 }
-    );
+    await gattOperation("Enable STAGE indications", () => chars.stage.startNotifications(), noSettle);
   } catch (error) {
     finalWaiter.cancel("STAGE subscription failed");
     throw error;
@@ -265,14 +261,16 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
   const finalRaw = await finalWaiter.promise;
   console.log(`✓ Received STAGE indication (${finalRaw.length} bytes)`);
 
+  await gattOperation("Write final nonce", async () => {
+    if (typeof chars.finalNonce.writeValueWithResponse === "function") {
+      await chars.finalNonce.writeValueWithResponse(finalNonceGattValue(nonce));
+    } else {
+      await chars.finalNonce.writeValue(finalNonceGattValue(nonce));
+    }
+  }, noSettle);
+
   const finalize = decodeProtocolBleFinalize(finalRaw);
   validateFinalize(finalize, applicationId, nonce);
-
-  await writeWithResponse(
-    chars.finalNonce,
-    finalNonceGattValue(nonce),
-    "Write final nonce"
-  );
 }
 
 async function doTheThing() {

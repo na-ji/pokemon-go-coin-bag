@@ -316,11 +316,12 @@ class BleClient(private val context: Context) {
     private suspend fun readCharacteristic(
         connectedGatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
+        settle: Boolean = true,
     ): ByteArray {
         readResult = CompletableDeferred()
         if (!connectedGatt.readCharacteristic(characteristic)) throw GattError("Failed to start characteristic read")
         val value = awaitGattOp("read of ${characteristic.uuid}") { readResult!!.await() }
-        delay(SETTLE_MS)
+        if (settle) delay(SETTLE_MS)
         return value
     }
 
@@ -330,6 +331,7 @@ class BleClient(private val context: Context) {
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray,
         writeType: Int,
+        settle: Boolean = true,
     ) {
         writeResult = CompletableDeferred()
         val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -341,11 +343,15 @@ class BleClient(private val context: Context) {
         }
         if (!started) throw GattError("Failed to start characteristic write")
         awaitGattOp("write of ${characteristic.uuid}") { writeResult!!.await() }
-        delay(SETTLE_MS)
+        if (settle) delay(SETTLE_MS)
     }
 
     @Suppress("DEPRECATION")
-    private suspend fun enableIndications(connectedGatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+    private suspend fun enableIndications(
+        connectedGatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        settle: Boolean = true,
+    ) {
         if (!connectedGatt.setCharacteristicNotification(characteristic, true)) {
             throw GattError("Failed to enable notifications for ${characteristic.uuid}")
         }
@@ -360,7 +366,7 @@ class BleClient(private val context: Context) {
         }
         if (!started) throw GattError("Failed to start CCCD write for ${characteristic.uuid}")
         awaitGattOp("CCCD write of ${characteristic.uuid}") { descriptorResult!!.await() }
-        delay(SETTLE_MS)
+        if (settle) delay(SETTLE_MS)
     }
 
     private suspend fun awaitIndication(uuid: UUID, timeoutMs: Long): ByteArray =
@@ -381,18 +387,20 @@ class BleClient(private val context: Context) {
             chars.getValue(ServiceUuids.writeApplicationId),
             applicationIdGattValue(applicationId),
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+            settle = false,
         )
         writeCharacteristic(
             connectedGatt,
             chars.getValue(ServiceUuids.writeInitialNonce),
             initialNonceGattValue(nonce),
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+            settle = false,
         )
 
         val dataChar = chars.getValue(ServiceUuids.indicateData)
         val firstRaw = coroutineScope {
             val waiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
-            enableIndications(connectedGatt, dataChar)
+            enableIndications(connectedGatt, dataChar, settle = false)
             waiter.await()
         }
         require(firstRaw.size >= 303) {
@@ -411,18 +419,21 @@ class BleClient(private val context: Context) {
                 chars.getValue(ServiceUuids.writeComplete),
                 complete,
                 BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+                settle = false,
             )
-            enableIndications(connectedGatt, stageChar)
+            enableIndications(connectedGatt, stageChar, settle = false)
             waiter.await()
         }
-        val finalize = decodeProtocolBleFinalize(finalRaw)
-        validateFinalize(finalize, applicationId, nonce)
 
         writeCharacteristic(
             connectedGatt,
             chars.getValue(ServiceUuids.writeFinalNonce),
             finalNonceGattValue(nonce),
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+            settle = false,
         )
+
+        val finalize = decodeProtocolBleFinalize(finalRaw)
+        validateFinalize(finalize, applicationId, nonce)
     }
 }
