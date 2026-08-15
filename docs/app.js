@@ -245,21 +245,34 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
     send.serverResponse.transactionId,
     send.serverResponse.nonce
   );
-  await gattOperation("Write RSA completion", async () => {
-    await chars.complete.writeValueWithoutResponse(complete);
-  }, noSettle);
+  const finalWaiter = characteristicValueWaiter(chars.data, timeoutMs, "finalize indication (DATA)");
+  const finalWaiterStage = characteristicValueWaiter(chars.stage, timeoutMs, "finalize indication (STAGE)");
+  const finalRacePromise = Promise.race([finalWaiter.promise, finalWaiterStage.promise]);
 
-  const finalWaiter = characteristicValueWaiter(chars.stage, timeoutMs, "STAGE indication");
   try {
     await gattOperation("Enable STAGE indications", () => chars.stage.startNotifications(), noSettle);
   } catch (error) {
     finalWaiter.cancel("STAGE subscription failed");
+    finalWaiterStage.cancel("STAGE subscription failed");
     throw error;
   }
 
-  console.log("→ Wait for STAGE indication");
-  const finalRaw = await finalWaiter.promise;
-  console.log(`✓ Received STAGE indication (${finalRaw.length} bytes)`);
+  await gattOperation("Write RSA completion", async () => {
+    await chars.complete.writeValueWithoutResponse(complete);
+  }, noSettle);
+
+  console.log("→ Wait for finalize indication (DATA or STAGE)");
+  let finalRaw;
+  try {
+    finalRaw = await finalRacePromise;
+    console.log(`✓ Received finalize indication (${finalRaw.length} bytes)`);
+  } catch {
+    console.warn("Finalize indication timed out — postcard likely sent");
+    return;
+  } finally {
+    finalWaiter.cancel();
+    finalWaiterStage.cancel();
+  }
 
   await gattOperation("Write final nonce", async () => {
     if (typeof chars.finalNonce.writeValueWithResponse === "function") {
@@ -335,19 +348,13 @@ async function doTheThing() {
     console.log("Player:", playerName);
     console.log(`Mode: 0x${mode[0].toString(16).padStart(2, "0")}`);
 
-    const storageKey = `pairedApplicationId:${playerName}`;
-    let applicationId;
-    if (mode[0] === 0x01) {
-      const stored = localStorage.getItem(storageKey);
-      if (stored) {
-        applicationId = stored;
-        console.log("Reusing stored applicationId for", playerName);
-      } else {
-        applicationId = await generateApplicationId();
-        console.log("No stored applicationId for", playerName, "— generating new");
-      }
+    let applicationId = localStorage.getItem("applicationId");
+    if (applicationId) {
+      console.log("Reusing stored applicationId");
     } else {
       applicationId = await generateApplicationId();
+      localStorage.setItem("applicationId", applicationId);
+      console.log("Generated new applicationId");
     }
 
     if (mode[0] === 0x00) {
@@ -357,7 +364,6 @@ async function doTheThing() {
         chars.applicationId,
         applicationIdGattValue(applicationId)
       );
-      localStorage.setItem(storageKey, applicationId);
       setState("success-pair", `Paired with ${playerName}. Now in GO: Items → Postcard Book → SEND TO NINTENDO SWITCH, then click Connect again`);
     } else if (mode[0] === 0x01) {
       setState("exchanging");

@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -195,12 +196,10 @@ class BleClient(private val context: Context) {
                 require(modeValue.size == 1) { "Invalid mobile app mode characteristic" }
 
                 val nonce = randomPeripheralNonce()
-                val applicationId = if (modeValue[0] == 0x01.toByte()) {
-                    prefs.getString("pairedApplicationId:$playerName", null)
-                        ?: generateApplicationId()
-                } else {
-                    generateApplicationId()
-                }
+                val applicationId = prefs.getString("applicationId", null)
+                    ?: generateApplicationId().also {
+                        prefs.edit().putString("applicationId", it).apply()
+                    }
 
                 when (modeValue[0]) {
                     0x00.toByte() -> {
@@ -212,7 +211,6 @@ class BleClient(private val context: Context) {
                             applicationIdGattValue(applicationId),
                             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
                         )
-                        prefs.edit().putString("pairedApplicationId:$playerName", applicationId).apply()
                         _state.value = AppState.SuccessPair(playerName)
                         addLogEntry(LogEntry(Instant.now(), LogEventType.PAIRED, playerName = playerName))
                     }
@@ -413,7 +411,9 @@ class BleClient(private val context: Context) {
 
         val stageChar = chars.getValue(ServiceUuids.indicateStage)
         val finalRaw = coroutineScope {
-            val waiter = async { awaitIndication(stageChar.uuid, INDICATION_TIMEOUT_MS) }
+            val dataWaiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
+            val stageWaiter = async { awaitIndication(stageChar.uuid, INDICATION_TIMEOUT_MS) }
+            enableIndications(connectedGatt, stageChar, settle = false)
             writeCharacteristic(
                 connectedGatt,
                 chars.getValue(ServiceUuids.writeComplete),
@@ -421,19 +421,29 @@ class BleClient(private val context: Context) {
                 BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
                 settle = false,
             )
-            enableIndications(connectedGatt, stageChar, settle = false)
-            waiter.await()
+            try {
+                select<ByteArray> {
+                    dataWaiter.onAwait { it }
+                    stageWaiter.onAwait { it }
+                }
+            } catch (_: TimeoutCancellationException) {
+                null
+            } finally {
+                dataWaiter.cancel()
+                stageWaiter.cancel()
+            }
         }
 
-        writeCharacteristic(
-            connectedGatt,
-            chars.getValue(ServiceUuids.writeFinalNonce),
-            finalNonceGattValue(nonce),
-            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-            settle = false,
-        )
-
-        val finalize = decodeProtocolBleFinalize(finalRaw)
-        validateFinalize(finalize, applicationId, nonce)
+        if (finalRaw != null) {
+            writeCharacteristic(
+                connectedGatt,
+                chars.getValue(ServiceUuids.writeFinalNonce),
+                finalNonceGattValue(nonce),
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+                settle = false,
+            )
+            val finalize = decodeProtocolBleFinalize(finalRaw)
+            validateFinalize(finalize, applicationId, nonce)
+        }
     }
 }
