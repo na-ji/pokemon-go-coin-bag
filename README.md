@@ -11,7 +11,7 @@ https://na-ji.github.io/pokemon-go-coin-bag/
 
 **Android app** — scans continuously in background, handles pairing and exchange automatically. Download APK from [GitHub Releases](https://github.com/na-ji/pokemon-go-coin-bag/releases).
 
-**iOS app** — same as Android: scans continuously in the foreground, handles pairing and exchange automatically. Build from [`ios/`](ios/).
+**iOS app** — same as Android: scans continuously in the foreground, handles pairing and exchange automatically. Download the unsigned IPA from [GitHub Releases](https://github.com/na-ji/pokemon-go-coin-bag/releases) and sideload with AltStore or TrollStore.
 
 ## How to use
 
