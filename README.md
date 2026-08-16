@@ -4,12 +4,14 @@ Emulates a Nintendo Switch over Bluetooth so you can pair with Pokémon GO and r
 
 Background on the real feature: https://scarletviolet.pokemon.com/en-gb/news/pokemon_go_connect/
 
-## Two versions
+## Three versions
 
 **Web app** — works in Chrome/Edge on desktop or Android. Open and go:
 https://na-ji.github.io/pokemon-go-coin-bag/
 
 **Android app** — scans continuously in background, handles pairing and exchange automatically. Download APK from [GitHub Releases](https://github.com/na-ji/pokemon-go-coin-bag/releases).
+
+**iOS app** — same as Android: scans continuously in the foreground, handles pairing and exchange automatically. Build from [`ios/`](ios/).
 
 ## How to use
 
@@ -33,5 +35,8 @@ docs/           Web app (static site, no build step)
   index.html
   style.css
 android/        Android app (Kotlin, Jetpack Compose)
+ios/            iOS app (Swift, SwiftUI + CoreBluetooth)
+  CoinBag/      app sources (Protocol.swift, BleClient.swift, StatusView.swift)
+  CoinBagTests/ golden-vector unit tests
 PROTOCOL.md     Protocol documentation
 ```

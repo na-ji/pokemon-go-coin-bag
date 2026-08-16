@@ -1,4 +1,4 @@
-name: Android Release
+name: Release
 
 on:
   push:
@@ -6,12 +6,13 @@ on:
       - main
     paths:
       - "android/**"
+      - "ios/**"
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  android:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -26,10 +27,6 @@ jobs:
       - name: Decode keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-        working-directory: android
-
       - name: Build release APK
         working-directory: android
         env:
@@ -37,7 +34,54 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Build unsigned IPA
+        working-directory: ios
+        run: |
+          xcodebuild archive \
+            -project CoinBag.xcodeproj \
+            -scheme CoinBag \
+            -configuration Release \
+            -archivePath build/CoinBag.xcarchive \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+          mkdir -p build/Payload
+          cp -r build/CoinBag.xcarchive/Products/Applications/CoinBag.app build/Payload/
+          cd build && zip -r CoinBag.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-ipa
+          path: ios/build/CoinBag.ipa
+
+  release:
+    needs: [android, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
 
       - name: Determine next release version
         id: version
@@ -57,7 +101,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
-            "android/app/build/outputs/apk/release/app-release.apk" \
+            android-apk/app-release.apk \
+            ios-ipa/CoinBag.ipa \
             --repo "${{ github.repository }}" \
             --title "Release ${{ steps.version.outputs.tag }}" \
             --notes "Automated build from commit ${{ github.sha }}"
