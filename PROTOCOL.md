@@ -55,7 +55,7 @@ sequenceDiagram
     W->>P: write applicationId
     W->>P: write initialNonce (nonce + NUL terminator)
     W->>P: subscribe DATA indications
-    P-->>W: DATA indication (SaturdayBleSendProto)
+    P-->>W: DATA indication(s) (SaturdayBleSendProto, possibly chunked)
     Note over W: decode transactionId, validate echoed appId+nonce
     Note over W: RSA sign(transactionId, nonce) → SaturdayCompleteProto
     W->>P: subscribe STAGE indications
@@ -71,6 +71,21 @@ sequenceDiagram
 - **Android GO** sends finalize on the **DATA** characteristic (same as the first indication).
 
 Implementations must listen on both DATA and STAGE for the finalize indication.
+
+### Messages may be split across multiple indications
+
+Some GO builds send each message as a series of **20-byte indications** instead of one, even though the link MTU is large. This was observed with GO on a Pixel 10 running Android 17 (build `CP3A-261005.005`). The same setup with GO on Android 16 still sends each message in a single indication.
+
+| message | indications | total |
+|---|---|---|
+| SaturdayBleSendProto (DATA) | 16 × 20 + 12 bytes | 332 bytes |
+| SaturdayBleFinalize (DATA) | 16 × 20 + 3 bytes | 323 bytes |
+
+- The chunks carry no framing or header. They are raw consecutive slices of the protobuf, so the first chunk starts with `0a …` as usual.
+- This is not an MTU problem. On the same connection, the ~304-byte `complete` write without response went through in a single ATT write, so the MTU is at least ~307. GO itself chooses the 20-byte chunk size.
+- It is unknown whether a newer GO version or Android 17 triggers this.
+
+Implementations must therefore concatenate consecutive indications on a characteristic until the buffer decodes as a complete message. Treating a short first indication as an error (the old "first indication ≥ 303 bytes" check) breaks the exchange. Because the chunks have no framing, a complete decode is the only end-of-message signal: a prefix of the message never decodes, since a length-delimited field is truncated or field 2 is missing. The write direction is unaffected: GO accepts `complete` as one write.
 
 ### Timing
 
