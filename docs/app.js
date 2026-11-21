@@ -1,6 +1,7 @@
 import {
   UUIDS,
   applicationIdGattValue,
+  bytesToHex,
   generateApplicationId,
   decodeProtocolBleFinalize,
   decodeProtocolBleSend,
@@ -133,11 +134,17 @@ async function writeWithoutResponse(characteristic, value, label) {
   });
 }
 
-function characteristicValueWaiter(characteristic, timeoutMs, label) {
+// Collects consecutive indications on one characteristic and concatenates them until the
+// buffer decodes as a complete message. Normally the first indication already holds the whole
+// message; on Pixel/Android 17 the first one arrives as 20 bytes, and this tests whether the
+// rest follows in further indications.
+function messageCollector(characteristic, timeoutMs, label, decode) {
   let settled = false;
   let rejectPromise;
   let resolvePromise;
   let timer;
+  const chunks = [];
+  let buffer = new Uint8Array(0);
 
   function cleanup() {
     clearTimeout(timer);
@@ -146,9 +153,20 @@ function characteristicValueWaiter(characteristic, timeoutMs, label) {
 
   function onValue(event) {
     if (settled) return;
+    const chunk = toBytes(event.target.value);
+    chunks.push(chunk);
+    buffer = concatChunks(buffer, chunk);
+    console.log(
+      `  ${label}: indication #${chunks.length} (${chunk.length} bytes, ${buffer.length} total): ${bytesToHex(chunk)}`
+    );
+    try {
+      decode(buffer);
+    } catch {
+      return; // incomplete — wait for the next indication
+    }
     settled = true;
     cleanup();
-    resolvePromise(toBytes(event.target.value));
+    resolvePromise(buffer);
   }
 
   const promise = new Promise((resolve, reject) => {
@@ -158,7 +176,12 @@ function characteristicValueWaiter(characteristic, timeoutMs, label) {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error(`Timed out after ${timeoutMs / 1000}s waiting for ${label}`));
+      reject(
+        new Error(
+          `Timed out after ${timeoutMs / 1000}s waiting for ${label}: got ${chunks.length} indication(s), ` +
+            `${buffer.length} bytes, message still incomplete`
+        )
+      );
     }, timeoutMs);
     characteristic.addEventListener("characteristicvaluechanged", onValue);
   });
@@ -173,6 +196,13 @@ function characteristicValueWaiter(characteristic, timeoutMs, label) {
       promise.catch(() => {});
     },
   };
+}
+
+function concatChunks(a, b) {
+  const result = new Uint8Array(a.length + b.length);
+  result.set(a, 0);
+  result.set(b, a.length);
+  return result;
 }
 
 async function getCharacteristics(service) {
@@ -201,6 +231,16 @@ async function getCharacteristics(service) {
       throw new Error(`Required characteristic ${name} (${uuid}) was not discovered`);
     }
     result[name] = characteristic;
+    const props = Object.entries({
+      read: characteristic.properties.read,
+      write: characteristic.properties.write,
+      writeWithoutResponse: characteristic.properties.writeWithoutResponse,
+      notify: characteristic.properties.notify,
+      indicate: characteristic.properties.indicate,
+    })
+      .filter(([, enabled]) => enabled)
+      .map(([prop]) => prop);
+    console.log(`  ${name}: [${props.join(", ")}]`);
   }
   return result;
 }
@@ -220,7 +260,12 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
     await chars.initialNonce.writeValueWithoutResponse(initialNonceGattValue(nonce));
   }, noSettle);
 
-  const firstWaiter = characteristicValueWaiter(chars.data, timeoutMs, "first DATA indication");
+  const firstWaiter = messageCollector(
+    chars.data,
+    timeoutMs,
+    "first DATA message",
+    decodeProtocolBleSend
+  );
   try {
     await gattOperation("Enable DATA indications", () => chars.data.startNotifications(), noSettle);
   } catch (error) {
@@ -228,14 +273,9 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
     throw error;
   }
 
-  console.log("→ Wait for first DATA indication");
+  console.log("→ Wait for first DATA message (collecting indications until it decodes)");
   const firstRaw = await firstWaiter.promise;
-  console.log(`✓ Received first DATA indication (${firstRaw.length} bytes)`);
-  if (firstRaw.length < 303) {
-    throw new Error(
-      `First indication is only ${firstRaw.length} bytes; the negotiated ATT MTU may be insufficient`
-    );
-  }
+  console.log(`✓ Received first DATA message (${firstRaw.length} bytes total)`);
 
   const send = decodeProtocolBleSend(firstRaw);
   validateSend(send, applicationId, nonce);
@@ -245,8 +285,18 @@ async function performExchange(chars, applicationId, nonce, timeoutMs) {
     send.serverResponse.transactionId,
     send.serverResponse.nonce
   );
-  const finalWaiter = characteristicValueWaiter(chars.data, timeoutMs, "finalize indication (DATA)");
-  const finalWaiterStage = characteristicValueWaiter(chars.stage, timeoutMs, "finalize indication (STAGE)");
+  const finalWaiter = messageCollector(
+    chars.data,
+    timeoutMs,
+    "finalize message (DATA)",
+    decodeProtocolBleFinalize
+  );
+  const finalWaiterStage = messageCollector(
+    chars.stage,
+    timeoutMs,
+    "finalize message (STAGE)",
+    decodeProtocolBleFinalize
+  );
   const finalRacePromise = Promise.race([finalWaiter.promise, finalWaiterStage.promise]);
 
   try {

@@ -28,7 +28,9 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withTimeout
 import java.time.Instant
 import java.util.UUID
@@ -81,7 +83,8 @@ class BleClient(private val context: Context) {
     private var readResult: CompletableDeferred<ByteArray>? = null
     private var writeResult: CompletableDeferred<Unit>? = null
     private var descriptorResult: CompletableDeferred<Unit>? = null
-    private val indications = MutableSharedFlow<Pair<UUID, ByteArray>>(extraBufferCapacity = 8)
+    // Some GO builds split each message into ~17 indications of 20 bytes; keep enough headroom.
+    private val indications = MutableSharedFlow<Pair<UUID, ByteArray>>(extraBufferCapacity = 64)
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -367,12 +370,32 @@ class BleClient(private val context: Context) {
         if (settle) delay(SETTLE_MS)
     }
 
-    private suspend fun awaitIndication(uuid: UUID, timeoutMs: Long): ByteArray =
-        try {
-            withTimeout(timeoutMs) { indications.first { it.first == uuid }.second }
+    /**
+     * Collects consecutive indications on [uuid] and concatenates them until [decode] accepts the
+     * buffer. Usually one indication carries the whole message, but some Pokémon GO builds (seen on
+     * Pixel / Android 17) split every message into 20-byte indications regardless of the ATT MTU.
+     */
+    private suspend fun awaitMessage(uuid: UUID, timeoutMs: Long, decode: (ByteArray) -> Any): ByteArray {
+        var buffer = ByteArray(0)
+        var count = 0
+        return try {
+            withTimeout(timeoutMs) {
+                indications
+                    .filter { it.first == uuid }
+                    .map { (_, chunk) ->
+                        buffer += chunk
+                        count += 1
+                        buffer
+                    }
+                    .first { candidate -> runCatching { decode(candidate) }.isSuccess }
+            }
         } catch (timeout: TimeoutCancellationException) {
-            throw GattError("Timed out after ${timeoutMs / 1000}s waiting for indication on $uuid")
+            throw GattError(
+                "Timed out after ${timeoutMs / 1000}s waiting for message on $uuid " +
+                    "($count indication(s), ${buffer.size} bytes received, still incomplete)"
+            )
         }
+    }
 
     private suspend fun performExchange(
         connectedGatt: BluetoothGatt,
@@ -397,12 +420,9 @@ class BleClient(private val context: Context) {
 
         val dataChar = chars.getValue(ServiceUuids.indicateData)
         val firstRaw = coroutineScope {
-            val waiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
+            val waiter = async { awaitMessage(dataChar.uuid, INDICATION_TIMEOUT_MS, ::decodeProtocolBleSend) }
             enableIndications(connectedGatt, dataChar, settle = false)
             waiter.await()
-        }
-        require(firstRaw.size >= 303) {
-            "First indication is only ${firstRaw.size} bytes; the negotiated ATT MTU may be insufficient"
         }
         val send = decodeProtocolBleSend(firstRaw)
         validateSend(send, applicationId, nonce)
@@ -411,8 +431,8 @@ class BleClient(private val context: Context) {
 
         val stageChar = chars.getValue(ServiceUuids.indicateStage)
         val finalRaw = coroutineScope {
-            val dataWaiter = async { awaitIndication(dataChar.uuid, INDICATION_TIMEOUT_MS) }
-            val stageWaiter = async { awaitIndication(stageChar.uuid, INDICATION_TIMEOUT_MS) }
+            val dataWaiter = async { awaitMessage(dataChar.uuid, INDICATION_TIMEOUT_MS, ::decodeProtocolBleFinalize) }
+            val stageWaiter = async { awaitMessage(stageChar.uuid, INDICATION_TIMEOUT_MS, ::decodeProtocolBleFinalize) }
             enableIndications(connectedGatt, stageChar, settle = false)
             writeCharacteristic(
                 connectedGatt,

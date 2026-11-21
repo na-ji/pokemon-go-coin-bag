@@ -11,7 +11,7 @@ enum BleError: Error, LocalizedError {
     case unsupportedProtocol
     case invalidMode
     case unsupportedMode(UInt8)
-    case mtuInsufficient(Int)
+    case messageTimedOut
     case servicesChanged
     case readTimedOut
 
@@ -40,8 +40,8 @@ enum BleError: Error, LocalizedError {
             return "Invalid mobile app mode characteristic"
         case .unsupportedMode(let mode):
             return String(format: "Unsupported mobile app mode 0x%02x", mode)
-        case .mtuInsufficient(let size):
-            return "First indication is only \(size) bytes; the negotiated ATT MTU may be insufficient"
+        case .messageTimedOut:
+            return "Timed out waiting for a complete first DATA message"
         case .servicesChanged:
             return "The peripheral changed its GATT services mid-operation"
         case .readTimedOut:
@@ -70,15 +70,22 @@ private let POST_SUCCESS_DELAY_NS: UInt64 = 5_000_000_000
 private let POST_FAILURE_DELAY_NS: UInt64 = 3_000_000_000
 private let SETTLE_NS: UInt64 = 75_000_000
 
+/// Waits for one complete message on a characteristic. Usually one indication carries the whole
+/// message, but some Pokémon GO builds (seen on Pixel / Android 17) split every message into
+/// 20-byte indications regardless of the ATT MTU, so chunks are concatenated until `isComplete`.
 private final class IndicationWaiter: @unchecked Sendable {
     let uuid: CBUUID
+    let isComplete: (Data) -> Bool
     var continuation: CheckedContinuation<Data?, Never>?
+    var buffer = Data()
+    var chunkCount = 0
     var received: Data?
     var timer: DispatchWorkItem?
     var resumed = false
 
-    init(uuid: CBUUID) {
+    init(uuid: CBUUID, isComplete: @escaping (Data) -> Bool) {
         self.uuid = uuid
+        self.isComplete = isComplete
     }
 }
 
@@ -500,10 +507,12 @@ final class BleClient: NSObject, ObservableObject, @unchecked Sendable {
         )
 
         let dataUUID = ServiceUuids.indicateData
-        let firstGetter = prepareIndication(dataUUID, timeout: INDICATION_TIMEOUT)
+        let firstGetter = prepareIndication(dataUUID, timeout: INDICATION_TIMEOUT) { data in
+            (try? decodeProtocolBleSend(data)) != nil
+        }
         try await enableIndications(dataUUID, settle: false)
-        guard let firstRaw = await firstGetter(), firstRaw.count >= 303 else {
-            throw BleError.mtuInsufficient(0)
+        guard let firstRaw = await firstGetter() else {
+            throw BleError.messageTimedOut
         }
 
         let send = try decodeProtocolBleSend(firstRaw)
@@ -511,8 +520,9 @@ final class BleClient: NSObject, ObservableObject, @unchecked Sendable {
         let complete = encodeProtocolComplete(send.serverResponse.transactionId, send.serverResponse.nonce)
 
         let stageUUID = ServiceUuids.indicateStage
-        let dataGetter = prepareIndication(dataUUID, timeout: INDICATION_TIMEOUT)
-        let stageGetter = prepareIndication(stageUUID, timeout: INDICATION_TIMEOUT)
+        let isCompleteFinalize: (Data) -> Bool = { data in (try? decodeProtocolBleFinalize(data)) != nil }
+        let dataGetter = prepareIndication(dataUUID, timeout: INDICATION_TIMEOUT, isComplete: isCompleteFinalize)
+        let stageGetter = prepareIndication(stageUUID, timeout: INDICATION_TIMEOUT, isComplete: isCompleteFinalize)
         try await enableIndications(stageUUID, settle: false)
         try await writeCharacteristic(ServiceUuids.writeComplete, complete, withResponse: false, settle: false)
 
@@ -544,8 +554,12 @@ final class BleClient: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - Indication waiters
 
-    private func prepareIndication(_ uuid: CBUUID, timeout: TimeInterval) -> @Sendable () async -> Data? {
-        let waiter = IndicationWaiter(uuid: uuid)
+    private func prepareIndication(
+        _ uuid: CBUUID,
+        timeout: TimeInterval,
+        isComplete: @escaping (Data) -> Bool
+    ) -> @Sendable () async -> Data? {
+        let waiter = IndicationWaiter(uuid: uuid, isComplete: isComplete)
         queue.async { [weak self] in
             guard let self else { return }
             self.waiters[uuid, default: []].append(waiter)
@@ -583,25 +597,34 @@ final class BleClient: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func deliverIndication(_ uuid: CBUUID, _ data: Data) {
-        guard var list = waiters[uuid], !list.isEmpty else {
+        guard var list = waiters[uuid], let waiter = list.first else {
             print("[BLE] deliverIndication \(uuid.uuidString) DROPPED — no waiter registered")
             return
         }
-        let waiter = list.removeFirst()
-        waiters[uuid] = list.isEmpty ? nil : list
         guard !waiter.resumed else {
+            list.removeFirst()
+            waiters[uuid] = list.isEmpty ? nil : list
             print("[BLE] deliverIndication \(uuid.uuidString) DROPPED — waiter already resumed")
             return
         }
+        waiter.buffer.append(data)
+        waiter.chunkCount += 1
+        guard waiter.isComplete(waiter.buffer) else {
+            print("[BLE] deliverIndication \(uuid.uuidString) chunk #\(waiter.chunkCount) (\(data.count) bytes, \(waiter.buffer.count) total) — incomplete, waiting")
+            return
+        }
+        list.removeFirst()
+        waiters[uuid] = list.isEmpty ? nil : list
         waiter.resumed = true
         waiter.timer?.cancel()
+        let message = waiter.buffer
         if let cont = waiter.continuation {
             waiter.continuation = nil
-            print("[BLE] deliverIndication \(uuid.uuidString) → resumed continuation (\(data.count) bytes)")
-            cont.resume(returning: data)
+            print("[BLE] deliverIndication \(uuid.uuidString) → resumed continuation (\(message.count) bytes, \(waiter.chunkCount) chunk(s))")
+            cont.resume(returning: message)
         } else {
-            waiter.received = data
-            print("[BLE] deliverIndication \(uuid.uuidString) → buffered (\(data.count) bytes)")
+            waiter.received = message
+            print("[BLE] deliverIndication \(uuid.uuidString) → buffered (\(message.count) bytes, \(waiter.chunkCount) chunk(s))")
         }
     }
 

@@ -60,8 +60,8 @@ as the Kotlin tests.
 ### iOS-specific differences from Android
 
 - **MTU**: CoreBluetooth has no `requestMtu()` API — the OS negotiates the ATT MTU
-  automatically. The exchange still enforces the same "first indication ≥ 303 bytes"
-  check as Android/Web and fails loudly if the negotiated MTU is too small.
+  automatically. Like Android/Web, the exchange concatenates consecutive indications
+  until the message decodes, so it also works when GO splits messages into 20-byte chunks.
 - **No-response writes**: CoreBluetooth does not call `didWriteValueFor` for
   `.withoutResponse` writes, so those are fire-and-forget (matches Web
   `writeValueWithoutResponse`, which also resolves immediately).
